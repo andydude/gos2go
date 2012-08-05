@@ -314,7 +314,7 @@
 (define (ds-function->go-name proc)
   (if (ds-function-attributes-has? proc 'go-name)
       (ds-function-attributes-ref proc 'go-name)
-      (string-append "_" (ds-function-mangled-name proc))))
+      (string-append (ds-function-mangled-name proc))))
 
 (define (ds-function->go-body proc)
   (let* ((stmts (map emit (ds-function-body proc)))
@@ -412,7 +412,7 @@
     `(define-func ,(cons name sig) ,body)))
 
 (define (define->ds-function expr)
-  (if (not (eqv? (car expr) 'define))
+  (when (not (eqv? (car expr) 'define))
         (error "define->ds-function expected 'define, got:" expr))
   (let* ((r (cdr expr))
          (sig (car r))
@@ -425,9 +425,9 @@
       (cons 'library (current-library-name)))))
 
 (define (define-func->ds-function expr)
-  (if (not (eqv? (car expr) 'define-func))
+  (when (not (eqv? (car expr) 'define-func))
         (error "define-func->ds-function expected 'define-func, got:" expr))
-  (if (symbol? (cadr expr))
+  (if (symbol? (car expr))
 
       ;; function definition
       (let* ((r (cdr expr))
@@ -435,30 +435,30 @@
              (body (cdr r))
              (name (car sig))
              (sig (cdr sig))
-             (args (map (lambda (v) (vector-ref v 0)) (most sig))))
+             (args (map vector-first (most sig))))
         (make-ds-function name args
-                          (cons 'signature sig)
-                          (cons 'begin body)
-                          (cons 'library (current-library-name))))
+             (cons 'signature sig)
+             (cons 'begin body)
+             (cons 'library (current-library-name))))
 
       ;; method definition
       (let* ((r (cdr expr))
              (sig (car r))
+             (body (cdr r))
              (recv (car sig))
              (sig (cdr sig))
-             (body (cdr r))
              (name (car sig))
              (sig (cdr sig))
-             (args (map (lambda (v) (vector-ref v 0)) (most sig))))
+             (args (map vector-first (most sig))))
         (make-ds-function name args
-                          (cons 'go-name (symbol->string name))
-                          (cons 'recv recv)
-                          (cons 'signature sig)
-                          (cons 'begin body)
-                          (cons 'library (current-library-name))))))
+             (cons 'go-name (symbol->string name))
+             (cons 'recv recv)
+             (cons 'signature sig)
+             (cons 'begin body)
+             (cons 'library (current-library-name))))))
 
 (define (lambda->ds-function expr)
-  (if (not (eqv? (car expr) 'lambda))
+  (when (not (eqv? (car expr) 'lambda))
         (error "lambda->ds-function expected 'lambda"))
   (let* ((r (cdr expr))
          (sig (car r))
@@ -472,12 +472,13 @@
   (append (most body) (list (list 'return (last body)))))
 
 (define (lambda-func->ds-function expr)
-  (if (not (eqv? (car expr) 'lambda-func))
+  (when (not (eqv? (car expr) 'lambda-func))
         (error "lambda-func->ds-function expected 'lambda-func"))
   (let* ((r (cdr expr))
          (sig (car r))
-         (body (cdr r)))
-    (make-ds-function "" (map car (most sig))
+         (body (cdr r))
+         (args (map vector-first (most sig))))
+    (make-ds-function "" args
       (cons 'signature sig)
       (cons 'begin body)
       (cons 'library (current-library-name)))))
@@ -624,11 +625,14 @@
 (define (emit->= . rest)
   (emit-list-and (map emit->=2 (most rest) (cdr rest))))
 
-(define (emit-<- expr) expr)
-(define (emit-<-! expr) expr)
-(define (emit-<-chan t) (string-append "<-chan " (emit t)))
-(define (emit-array n t) (string-append "[" (emit-number n) "]" (emit t)))
-(define (emit-array... t) (string-append "[...]" (emit t)))
+(define (emit-<- a)
+  (string-append "<-" (emit a)))
+(define (emit-<-! a b)
+  (string-append (emit a) "<-" (emit b)))
+(define (emit-array n t)
+  (string-append "[" (emit-number n) "]" (emit t)))
+(define (emit-array... t)
+  (string-append "[...]" (emit t)))
 
 (define (emit-adr expr)
   (string-append "&" (emit expr)))
@@ -727,9 +731,10 @@
       (apply emit-let-loop 'Any frst rest)))
 
 (define (emit-type-name a)
-  (if (symbol? a)
-      (symbol->string a)
-      (emit a)))
+  (emit-symbol a))
+;  (if (symbol? a)
+;      (symbol->string a)
+;      (emit a)))
       
 (define (emit-as a b . rest)
   (if (null? rest)
@@ -739,6 +744,9 @@
 (define (emit-else . rest)
   (string-append "\n} else {\n\t"
      (string-join (map emit rest) "\n\t")))
+
+(define (emit-map-type a b)
+  (string-append "map[" (emit a) "]" (emit b)))
 
 (define (emit-function-name fn)
   (let ((out (emit fn)))
@@ -776,10 +784,11 @@
   (string-append "(" (string-join (map emit rest) " || ") ")"))
 
 (define (emit-bool b) (if b "true" "false"))
-(define (emit-char c) (string-append "'" (list->string (list c)) "'"))
+(define (emit-char c) (string-append "'" (string-escape (list->string (list c))) "'"))
 
-(define (emit-chan t) (string-append "chan " (emit t)))
-(define (emit-chan<- t) (string-append "chan<- " (emit t)))
+(define (emit-chan t) (string-append "chan " (emit-type-name t)))
+(define (emit-chan<- t) (string-append "<-chan " (emit-type-name t)))
+(define (emit-chan<-! t) (string-append "chan<- " (emit-type-name t)))
 
 (define (emit-comment text) (string-append "// " text "\n"))
 
@@ -928,6 +937,19 @@
   (string-append
     "switch " (emit a) "; " (emit b)
     (emit-braces emit-expr-case-clause rest)))
+
+;(define (emit-select-comm-clause clause)
+;  (string-append
+;   (if (eqv? (car clause) 'else)
+;       "default:\n" 
+;       (string-append
+;        "case " (emit (car clause)) ":\n"))
+;   (list->go-block (cdr clause))))
+
+(define (emit-select-comm . rest)
+  (string-append
+    "select "
+    (emit-braces emit-expr-cond-clause rest)))
 
 (define (emit-for1 c . rest)
   (string-append
@@ -1171,14 +1193,16 @@
               (rs (last args)))
           (string-append
            (emit-signature-args ag)
-           (if (pair? rs)
-               (let ((r (car rs)))
-                 (if (eqv? r 'void)
-                     ""
-                     (if (eqv? r 'values)
-                         (emit-signature-args (cdr rs))
-                         (emit-signature-args (list rs)))))
-               (emit rs))))))
+           (if (eqv? rs '&void)
+               ""
+               (if (pair? rs)
+                   (let ((r (car rs)))
+                     (if (eqv? r 'void)
+                         ""
+                         (if (eqv? r 'values)
+                             (emit-signature-args (cdr rs))
+                             (emit-signature-args (list rs)))))
+                   (emit rs)))))))
 
 (define (emit-signature sig)
   (let ((fn (car sig))
@@ -1221,12 +1245,39 @@
       (emit-signature-arg field)))
 
 (define (emit-symbol id)
+  (define symbol-table '(
+          ; types
+          ("&byte" . "byte")
+          ("&complex64" . "complex64")
+          ("&complex128" . "complex128")
+          ("&float32" . "float32")
+          ("&float64" . "float64")
+          ("&int" . "int")
+          ("&int8" . "int8")
+          ("&int16" . "int16")
+          ("&int32" . "int32")
+          ("&int64" . "int64")
+          ("&rune" . "rune")
+          ("&string" . "string")
+          ("&uint" . "uint")
+          ("&uint8" . "uint8")
+          ("&uint16" . "uint16")
+          ("&uint32" . "uint32")
+          ("&uint64" . "uint64")
+          ("&uintptr" . "uintptr")
+          ("&void" . "")
+          ; objects
+          ("%nil" . "nil")))
   (if (symbol? id)
-      (let ((out (symbol->mangle id)))
-        (if (or (go-keyword? out)
-                (go-encoded? out))
-            (string-append "__" out)
-            out))
+      (let ((s (symbol->string id)))
+        (if (or (eqv? (string-ref s 0) #\%)
+                (eqv? (string-ref s 0) #\&))
+            (cdr (assoc s symbol-table))
+            (let ((out (symbol->mangle id)))
+              (if (or (go-keyword? out)
+                      (go-encoded? out))
+                  (string-append "__" out)
+                  out))))
       (error id)))
 
 (define (emit-type . rest)
@@ -1374,6 +1425,8 @@
       (cdr (assoc y (syntax-table)))
       (error "expected symbol")))
 
+(define (emit-void . r) "")
+
 (define (emit expr)
   (if (pair? expr)
       (if (assoc (car expr) (syntax-table))
@@ -1394,8 +1447,8 @@
 
 (define (syntax-table)
   (list
-;    (cons '<-             emit-<-         )
-;    (cons '<-!            emit-<-!        )
+    (cons '<-             emit-<-         )
+    (cons '<-!            emit-<-!        )
     (cons '*              emit-*          )
     (cons '+              emit-+          )
     (cons '++             emit-++         )
@@ -1420,11 +1473,12 @@
     (cons 'as             emit-as         ) ; a.(b).c().(d).e()
     (cons 'break          emit-break      )
     (cons 'call           emit-gocall     )
+    (cons 'map-type       emit-map-type     )
 ;    (cons 'call           emit-call       )
 ;    (cons 'case           emit-case       )
-;    (cons 'chan           emit-chan       )
-;    (cons 'chan<-         emit-chan<-     )
-;    (cons 'chan<-!        emit-chan<-!    )
+    (cons 'chan           emit-chan       )
+    (cons 'chan<-         emit-chan<-     )
+    (cons 'chan<-!        emit-chan<-!    )
     (cons 'comment        emit-comment    )
     (cons 'continue       emit-continue   )
     (cons 'defer          emit-defer      )
@@ -1466,7 +1520,7 @@
     (cons 'ptr            emit-ptr        )
     (cons 'range          emit-for2      )
     (cons 'return         emit-return     )
-;    (cons 'comm!         emit-comm!     )
+    (cons 'comm!          emit-select-comm )
     (cons 'cond!          emit-switch-cond )
     (cons 'cond!*         emit-switch-cond*)
     (cons 'case!          emit-switch-case )
@@ -1474,7 +1528,16 @@
     (cons 'type!          emit-switch-type )
     (cons 'type!*         emit-switch-type*)
     (cons 'struct         emit-struct     )
+    (cons 'void           emit-void     )
     (cons 'while          emit-for1       )))
+
+(define (droscheme-read-file filename)
+  (let ((fnlen (string-length filename)))
+    (if (and (> fnlen 4)
+             (equal? (substring filename (- fnlen 4) fnlen)
+                     ".ild"))
+        (sugar-read filename)
+        (read filename))))
 
 ;; globals
 
