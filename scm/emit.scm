@@ -4,6 +4,7 @@
 
 (define *top-context* (make-parameter #t))
 (define *type-context* (make-parameter #f))
+(define *binary-context* (make-parameter #f))
 
 ;; General functions
 
@@ -204,6 +205,28 @@
             ;      out))))
       (error id)))
 
+(define (emit-op sym)
+  (define *table* '(
+          ("bitwise-and" . "&")
+          ("bitwise-and=" . "&=")
+          ("bitwise-but" . "&^")
+          ("bitwise-but=" . "&^=")
+          ("bitwise-or" . "|")
+          ("bitwise-or=" . "|=")
+          ("bitwise-xor" . "^")
+          ("bitwise-xor=" . "^=")
+          ("and" . "&&")
+          ("not" . "!")
+          ("or" . "||")))
+  (cond
+   ((string? sym) sym)
+   ((symbol? sym)
+    (let ((str (symbol->string sym)))
+      (if (assoc str *table*)
+          (cdr (assoc str *table*))
+          str)))
+   (else (error "emit-op expected string or symbol, got" sym))))
+
 (define (emit-literal vec)
   (let ((l (vector->list vec)))
     (string-append 
@@ -213,6 +236,12 @@
 (define (emit-params fields)
   (parameterize ((*type-context* #t))
    (string-join (map emit-field fields) ", ")))
+
+(define (emit-params... fields)
+  (parameterize ((*type-context* #t))
+   (string-join (append 
+    (map emit-field (most fields)) 
+    (list (emit-field... (last fields)))) ", ")))
 
 (define (emit-fields fields)
   (string-join (map emit-field fields) "\n"))
@@ -231,30 +260,42 @@
         (string-append (emit-exprs ms) " ..." (emit-expr ls)))
       (string-append " ..." (emit-expr field))))
 
-(define (emit-short op vars . vals)
-  (emit-assign op vars vals))
+(define (emit-branch kwsym rest)
+  (let ((kw (symbol->string kwsym)))
+    (if (null? rest)
+        kw
+        (string-append kw " 2" (emit-expr (car rest))))))
 
-(define (emit-assign op vars vals)
+(define (emit-assign op vars . vals)
   ;(write (list 'emit-assign op vars vals))
   (string-append
     (cond
       ;; string means cached output
       ((string? vars) vars)
       ((symbol? vars) (emit-symbol vars))
-      ((vector? vars) (emit-fields vars))
+      ((vector? vars) (emit-field vars))
       ((list? vars) (emit-exprs vars))
       (else (error "assign-stmt expected list or symbol" vars)))
     " "
-    (cond
-     ((string? op) op)
-     ((symbol? op) (symbol->string op))
-     (else (error "assign-stmt expected string or symbol" op)))
+    (emit-op op)
     " "
     (emit-exprs vals)))
 
-(define (emit-binary op vals)
-  (string-join (map emit-expr vals)
-    (string-append " " op " ")))
+(define (emit-binary op . vals)
+  (define (emit1 expr)
+    (if (and (pair? expr) (eqv? (car expr) op))
+        (emit-expr expr)
+        (parameterize
+         ((*binary-context* #t))
+         (emit-expr expr))))
+  (define (emit2 opstr)
+    (if (= (length vals) 1)
+        (string-append opstr (emit-expr (car vals)))
+        (string-join (map emit1 vals)
+                     (string-append " " opstr " "))))
+  (if (*binary-context*)
+      (string-append "(" (emit2 (emit-op op)) ")")
+      (emit2 (emit-op op))))
 
 (define (emit-parens kw proc rest)
   (if (= (length rest) 1)
@@ -291,7 +332,7 @@
 (define (emit-values specs)
   (define (emit spec)
     (if (and (list? spec) (eqv? (car spec) '=))
-        (apply emit-short spec)
+        (apply emit-assign spec)
         (emit-field spec)))
   (string-join (map emit specs) "\n"))
 
@@ -313,6 +354,13 @@
           (string-append "case " (emit-expr expr) ":\n" (emit-stmts stmts)))))
   (string-append "{\n" (string-join (map emit-cond clauses) "\n") "\n}\n"))
 
+(define (emit-range a)
+  (define (emit sym lhs . rhs)
+    (if (eqv? sym ':=)
+        (apply emit-assign ":= range " lhs rhs)
+        (error "emit-range expected :=, got" sym)))
+  (apply emit a))
+
 (define (emit-sig ins ret)
   (string-append "(" 
     (emit-params ins) ")" 
@@ -320,16 +368,13 @@
 
 (define (emit-sig... ins ret)
   (string-append "(" 
-    (string-join (append 
-     (emit-params (most ins)) 
-     (list (emit-field... (last ins)))) ", ")
-    ")"
+    (emit-params... ins) ")"
     (emit-expr ret)))
 
 (define (emit-as a b . rest)
   (if (null? rest)
-      (string-append (emit a) ".(" (emit-type-name b) ")")
-      (apply emit-dot (list 'as a b) rest)))
+      (string-append (emit-expr a) ".(" (emit-expr b) ")")
+      (apply emit-expr 'dot (list 'as a b) rest)))
 
 (define (emit-else-block stmts)
   (if (null? stmts)
