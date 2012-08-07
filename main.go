@@ -4,23 +4,38 @@ import (
 //	"go/parser"
 //	"go/printer"
 //	"go/token"
+	"flag"
 	"os"
 	"os/exec"
 )
 
-func compile(filename string) {
-	// find gofmt
-	gofmt, err := exec.LookPath("gofmt")
-	if err != nil {
-		panic(err)
-	}
-	fmt := exec.Command(gofmt)
-	fmt.Stderr = os.Stderr
-	fmt.Stdout = os.Stdout
-	wc, err := fmt.StdinPipe()
-	if err != nil {
-		panic(err)
-	}
+var debug = flag.Bool("d", false, "print debugging info")
+var raw = flag.Bool("r", false, "print unformatted output")
+var inputname = flag.String("i", "-", "input filename")
+var outputname = flag.String("o", "-", "output filename")
+
+func compile() {
+    // open input file
+    rd, err := func()(file *os.File, err error){
+        if *inputname == "-" {
+            return os.Stdin, nil
+        }
+        return os.Open(*inputname)
+    }()
+    if err != nil {
+        panic(err)
+    }
+
+    // open output file
+    wr, err := func()(file *os.File, err error){
+        if *outputname == "-" {
+            return os.Stdout, nil
+        }
+        return os.Create(*outputname)
+    }()
+    if err != nil {
+        panic(err)
+    }
 
 	// find guile
 	guile, err := exec.LookPath("guile")
@@ -28,23 +43,47 @@ func compile(filename string) {
 		panic(err)
 	}
 	script := os.Getenv("GOPATH") + "/src/gos2go/scm/gos2go-guile.scm"
-	cmd := exec.Command(guile, "--debug", "-s", script, filename)
-	cmd.Stdin = os.Stdin
+	cmd := exec.Command(guile, "--debug", "-s", script)
+	cmd.Stdin = rd
 	cmd.Stderr = os.Stderr
-	cmd.Stdout = wc
 
-	err = fmt.Start()
+	if *raw {
+		cmd.Stdout = wr
+		cmd.Run()
+		if *inputname != "-" {
+			rd.Close()
+		}
+		if *outputname != "-" {
+			wr.Close()
+		}
+		return
+	}
+
+	// find gofmt
+	gofmt, err := exec.LookPath("gofmt")
+	if err != nil {
+		panic(err)
+	}
+	cpp := exec.Command(gofmt)
+	cpp.Stderr = os.Stderr
+	cpp.Stdout = os.Stdout
+	wc, err := cpp.StdinPipe()
+	if err != nil {
+		panic(err)
+	}
+	cmd.Stdout = wc
+	
+	err = cpp.Start()
 	if err != nil { panic(err) }
 	err = cmd.Run()
 	if err != nil { panic(err) }
 	err = wc.Close()
 	if err != nil { panic(err) }
-	err = fmt.Wait()
+	err = cpp.Wait()
 	if err != nil { panic(err) }
-	
 }
 
 func main() {
-	filename := os.Args[1]
-	compile(filename)
+	flag.Parse()
+	compile()
 }

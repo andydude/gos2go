@@ -42,10 +42,11 @@
 ;        'pre s 'post)))
 
 ;; TODO: don't ask...
-(define (string-escape a)
-  (let* ((b (string-replace a "\\\\" "\\\\"))
-         (c (string-replace b "\\\"" "\\\""))
-         (d (string-replace c "\x07" "\\a"))
+(define (string-escape z)
+  (let* ((a (string-replace z "\\\\" "\\\\"))
+         (b (string-replace a "\\\"" "\\\""))
+         ;(c (string-replace b "\x00" "\\x00"))
+         (d (string-replace b "\x07" "\\a"))
          (e (string-replace d "\x08" "\\b"))
          (f (string-replace e "\x0B" "\\v"))
          (g (string-replace f "\x0C" "\\f"))

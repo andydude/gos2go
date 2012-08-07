@@ -1,6 +1,5 @@
 ; -*- mode: scheme -*-
 (use-modules (ice-9  match))
-(load "base-guile.scm")
 
 (define *top-context* (make-parameter #t))
 (define *type-context* (make-parameter #f))
@@ -73,9 +72,6 @@
 
 (define (symbol->mangle sym)
   (string->mangle (symbol->string sym)))
-
-(define (string-escape s)
-  s)
 
 (define (go-encoded? name)
   (if (>= (string-length name) 2)
@@ -160,14 +156,15 @@
 (define (emit-char ch)
   (string-append "'" (string-escape (string ch)) "'"))
 
-(define (emit-string st)
-  (string-append "\"" (string-escape st) "\""))
+(define (emit-string s)
+  (string-append "\"" (string-escape s) "\""))
 
 ;(define (emit-symbol id)
 ;  (symbol->string id))
 (define (emit-symbol id)
   (define *table* '(
           ; types
+          ("&any" . "interface{}")
           ("&bool" . "bool")
           ("&byte" . "byte")
           ("&complex64" . "complex64")
@@ -175,13 +172,13 @@
           ("&error" . "error")
           ("&float32" . "float32")
           ("&float64" . "float64")
-          ("&imm-string" . "string")
           ("&int" . "int")
           ("&int8" . "int8")
           ("&int16" . "int16")
           ("&int32" . "int32")
           ("&int64" . "int64")
           ("&rune" . "rune")
+          ("&str" . "string")
           ("&uint" . "uint")
           ("&uint8" . "uint8")
           ("&uint16" . "uint16")
@@ -216,6 +213,7 @@
           ("bitwise-xor" . "^")
           ("bitwise-xor=" . "^=")
           ("and" . "&&")
+          ("dot" . ".")
           ("not" . "!")
           ("or" . "||")))
   (cond
@@ -264,7 +262,7 @@
   (let ((kw (symbol->string kwsym)))
     (if (null? rest)
         kw
-        (string-append kw " 2" (emit-expr (car rest))))))
+        (string-append kw " " (emit-expr (car rest))))))
 
 (define (emit-assign op vars . vals)
   ;(write (list 'emit-assign op vars vals))
@@ -282,8 +280,22 @@
     (emit-exprs vals)))
 
 (define (emit-binary op . vals)
+  (define (mul-op? op) (memv op '(* / % << >> bitwise-and bitwise-but)))
+  (define (add-op? op) (memv op '(+ - bitwise-or bitwise-xor)))
+  (define (rel-op? op) (memv op '(== != < <= > >=)))
+  (define (and-op? op) (eqv? op 'and))
+  (define (or-op? op) (eqv? op 'or))
+  (define (op<=? op qo)
+    (cond
+     ((or-op? op) #t)
+     ((and-op? op) (not (or-op? qo)))
+     ((rel-op? op) (and (not (or-op? qo)) (not (and-op? qo))))
+     ((add-op? op) (or (add-op? qo) (mul-op? qo)))
+     ((mul-op? op) (mul-op? qo))))
   (define (emit1 expr)
-    (if (and (pair? expr) (eqv? (car expr) op))
+    ;; simple precedence rules
+    (if (and (pair? expr)
+             (op<=? op (car expr)))
         (emit-expr expr)
         (parameterize
          ((*binary-context* #t))
@@ -298,22 +310,33 @@
       (emit2 (emit-op op))))
 
 (define (emit-parens kw proc rest)
+  ;(display "\nemit-parens")
+  ;(write rest)
   (if (= (length rest) 1)
       (string-append kw " " (proc rest) "\n")
-      (string-append kw " (\n\t" (proc rest) "\n)\n")))
+      (string-append kw " (\n" (proc rest) "\n)\n")))
 
 (define (emit-imports specs)
-  (define emit-spec emit-string)
-  (define (emit spec)
+  (define (emit-spec spec)
+    ;(display "\nemit2")
+    ;(write spec)
+    ;(newline)
     (cond
-     ((string? spec)
-      (emit-spec spec))
-     ((list? spec)
-      (case (car spec)
-        (('as) (string-append (emit-symbol (cadr spec)) " " (emit-spec (caddr spec))))
-        (('dot) (string-append ". " (emit-spec (cadr spec))))
-        (else (error "import expected list or string"))))))
-  (string-join (map emit specs) "\n"))
+     ((string? spec) (emit-string spec))
+     ((pair? spec)
+      (cond
+       ((eqv? (car spec) 'as)
+        (string-append (emit-symbol (cadr spec)) " " (emit-string (caddr spec))))
+       ((eqv? (car spec) 'dot)
+        (string-append ". " (emit-string (cadr spec))))
+       (else (error "import expected list or string"))))))
+  ;(write specs)
+  (string-join (map emit-spec specs) "\n"))
+
+(define (emit-type-block types)
+  (if (= (length types) 0)
+      "{}"
+      (string-append "{\n" (emit-fields types) "\n}\n")))
 
 (define (emit-type-parens kw proc rest)
   (if (= (length rest) 2)
@@ -361,15 +384,20 @@
         (error "emit-range expected :=, got" sym)))
   (apply emit a))
 
+(define (emit-return-type ret)
+   (if (vector? ret)
+       (string-append "(" (emit-field ret) ")")
+       (emit-field ret)))
+
 (define (emit-sig ins ret)
   (string-append "(" 
     (emit-params ins) ")" 
-    (emit-expr ret)))
+    (emit-return-type ret)))
 
 (define (emit-sig... ins ret)
   (string-append "(" 
     (emit-params... ins) ")"
-    (emit-expr ret)))
+    (emit-return-type ret)))
 
 (define (emit-as a b . rest)
   (if (null? rest)
@@ -382,9 +410,15 @@
       (let ((ms (most stmts))
             (ls (last stmts)))
         (if (eqv? (car ls) 'else)
-            (string-append "{\n\t" 
-             (emit-stmts ms) "\n} else {\n" 
-             (emit-stmts (cdr ls)) "\n}\n")
+            (if (= (length ls) 2)
+                ;; else if
+                (string-append "{\n\t" 
+                 (emit-stmts ms) "\n} else " 
+                 (emit-stmts (cdr ls)))
+                ;; else
+                (string-append "{\n\t" 
+                 (emit-stmts ms) "\n} else {\n" 
+                 (emit-stmts (cdr ls)) "\n}\n"))
             (emit-block stmts)))))
 
 (define (emit-block stmts)
@@ -406,6 +440,7 @@
   (string-join (map emit-expr exprs) ", "))
 
 (define (emit-expr expr)
+  ;(display "\nemit-expr")
   ;(when (string? expr)
   ;      (display (string-append "emit-str " expr "\n")))
   ;(when (symbol? expr)
@@ -413,7 +448,10 @@
   ;(when (pair? expr)
   ;      (display (string-append "emit-lst (" (symbol->string (car expr)) " ...)\n")))
   (cond
-    ((pair? expr) (apply apply-go expr))
+    ((pair? expr)
+     (if (eqv? (car expr) 'quote)
+         (emit-expr (cdr expr))
+         (apply apply-go expr)))
     ((char? expr) (emit-char expr))
     ((boolean? expr) (if expr "true" "false"))
     ((number? expr) (number->string expr))
@@ -458,3 +496,191 @@
                   (lambda () (catch 'match-error do-match no-match))
                   yes-match)))
     (if t t (apply apply-go 'apply expr))))
+
+(define (*rules* . expr)
+  (match expr
+
+    ;; binary operators
+    (('!= . vals)      (apply emit-binary expr))
+    (('% . vals)       (apply emit-binary expr))
+    (('%= vars . vals) (apply emit-assign expr))
+    (('* . vals)       (apply emit-binary expr))
+    (('*= vars . vals) (apply emit-assign expr))
+    (('+ . vals)       (apply emit-binary expr))
+    (('+= vars . vals) (apply emit-assign expr))
+    (('- . vals)       (apply emit-binary expr))
+    (('-= vars . vals) (apply emit-assign expr))
+    (('/ . vals)       (apply emit-binary expr))
+    (('/= vars . vals) (apply emit-assign expr))
+    ((':= vars . vals) (apply emit-assign expr))
+    (('< . vals)       (apply emit-binary expr))
+    (('<< . vals)      (apply emit-binary expr))
+    (('<<= vars . vals)(apply emit-assign expr))
+    (('<= . vals)      (apply emit-binary expr))
+    (('= vars . vals)  (apply emit-assign expr))
+    (('== . vals)      (apply emit-binary expr))
+    (('> . vals)       (apply emit-binary expr))
+    (('>= . vals)      (apply emit-binary expr))
+    (('>> . vals)      (apply emit-binary expr))
+    (('>>= vars . vals)(apply emit-assign expr))
+    (('and . vals)     (apply emit-binary expr))
+    (('dot . vals)     (apply emit-binary expr))
+    (('or . vals)      (apply emit-binary expr))
+
+    ;; bitwise operators
+    (('bitwise-and . vals)       (apply emit-binary expr))
+    (('bitwise-and= vars . vals) (apply emit-assign expr))
+    (('bitwise-but . vals)       (apply emit-binary expr))
+    (('bitwise-but= vars . vals) (apply emit-assign expr))
+    (('bitwise-or . vals)        (apply emit-binary expr))
+    (('bitwise-or= vars . vals)  (apply emit-assign expr))
+    (('bitwise-xor . vals)       (apply emit-binary expr))
+    (('bitwise-xor= vars . vals) (apply emit-assign expr))
+
+    ;; other operators
+    (('++ expr) `(,expr "++"))
+    (('-- expr) `(,expr "--"))
+    ((': key value) `(,(emit-expr key) ": " ,(emit-expr value)))
+    (('<- chan) `("<-" ,chan))
+    (('<-! chan expr) `(,chan "<-" ,expr))
+    (('adr expr) `("&" ,expr))
+    (('as . body) (apply emit-as body))
+    (('not expr) `("!" ,expr))
+    (('ptr expr) `("*" ,expr))
+    (('label id . stmts) `(,id ":" ,(emit-stmts stmts)))
+
+    ;; keywords
+    (('apply fn . args)
+     `(,fn "(" ,(emit-exprs args) ")"))
+    (('apply... fn . args)
+     `(,fn "(" ,(emit-exprs args) "...)"))
+    (('array length type)
+     `("[" ,length "]" ,type))
+    (('values . types)
+     `("(" ,(emit-params types) ")"))
+    (('array... type)
+     `("[...]" ,type))
+    (('slice type)
+     `("[]" ,type))
+    (('struct . fields)
+     `("struct" ,(emit-type-block fields)))
+    (('map-type key-type type)
+     `("map" "[" ,key-type "]" ,type))
+    (('chan type) `("chan" ,type))
+    (('chan<- type) `("<-chan" ,type))
+    (('chan<-! type) `("chan<-" ,type))
+    (('interface . methods)
+     `("interface" ,(emit-type-block methods)))
+
+    (('break . rest) (emit-branch 'break rest))
+    (('continue . rest) (emit-branch 'continue rest))
+    (('fallthrough . rest) (emit-branch 'fallthrough rest))
+    (('goto . rest) (emit-branch 'goto rest))
+
+    (('for a b c . body)
+     `("for" ,a ";" ,b ";" ,c ,(emit-block body)))
+    (('while c . body)
+     `("for" ,c ,(emit-block body)))
+    (('range a . body)
+     `("for" ,(emit-range a) ,(emit-block body)))
+
+    (('branch-stmt kw . label)
+     `(kw ,@label))
+    (('package name . decls)
+     `("package" ,name "\n" ,(emit-decls decls)))
+    (('return . expr)
+     `("return" ,(emit-exprs expr)))
+    (('defer expr)
+     `("defer" ,expr))
+
+    ;; The "if/else" keywords
+    (('when expr . body)
+     `("if" ,expr ,(emit-else-block body)))
+    (('when* stmt expr . body)
+     `("if" ,stmt ";" ,expr ,(emit-else-block body)))
+    (('unless expr . body)
+     `("if !" ,expr ,(emit-else-block body)))
+    (('unless* stmt expr . body)
+     `("if" ,stmt "; !" ,expr ,(emit-else-block body)))
+
+
+    ;; The "switch/select" keywords
+    (('case! expr . body)
+     `("switch" ,expr ,(emit-cases body)))
+    (('case!* stmt expr . body)
+     `("switch" ,stmt ";" ,expr ,(emit-cases body)))
+    (('comm! . body)
+     `("select" ,(emit-conds body)))
+    (('cond! . body)
+     `("switch" ,(emit-conds body)))
+    (('cond!* stmt . body)
+     `("switch" stmt ";" ,(emit-conds body)))
+    (('type! expr . body)
+     `("switch" ,expr ,(emit-cases body)))
+    (('type!* stmt expr . body)
+     `("switch" ,stmt ";" ,expr ,(emit-cases body)))
+
+    (('index expr j . ks)
+     (let ((offset (lambda (k) (if (not k) "" (emit-expr k)))))
+       (if (pair? ks)
+           `(,expr "[" ,(offset j) ":" ,(offset (car ks)) "]")
+           `(,expr "[" ,(offset j) "]"))))
+
+    (('import . specs)
+     (emit-parens "import" emit-imports specs))
+    (('type . specs)
+     (emit-type-parens "type" emit-types specs))
+    (('const . specs)
+     (emit-parens "const" emit-values specs))
+    (('var . specs)
+     (emit-parens "var" emit-values specs))
+
+    (('define-func name sig ret . body)
+     (if (*top-context*)
+         `("func" ,name ,(emit-sig sig ret) ,(emit-block body)) ; FuncDecl
+         `("var" ,name " = func" ,(emit-sig sig ret) ,(emit-block body)))) ; FuncStmt
+
+    (('define-func... name sig ret . body)
+     (if (*top-context*)
+         `("func" ,name ,(emit-sig... sig ret) ,(emit-block body)) ; FuncDecl
+         `("var" ,name " = func" ,(emit-sig... sig ret) ,(emit-block body)))) ; FuncStmt
+
+    (('define-method-func rec name sig ret . body)
+     `("func (" ,(emit-field rec) ")" ,name 
+                ,(emit-sig sig ret) 
+                ,(emit-block body)))
+
+    (('define-method-func... rec name sig ret . body)
+     `("func (" ,(emit-field rec) ")" ,name 
+                ,(emit-sig... sig ret) 
+                ,(emit-block body)))
+
+    (('lambda-func sig ret . body)
+     (if (*type-context*)
+         `("func" ,(emit-sig sig ret)) ; FuncType
+         `("func" ,(emit-sig sig ret) 
+                  ,(emit-block body)))) ; FuncExpr
+
+    (('lambda-func... sig ret . body)
+     (if (*type-context*)
+         `("func" ,(emit-sig... sig ret)) ; FuncType
+         `("func" ,(emit-sig... sig ret) 
+                  ,(emit-block body)))) ; FuncExpr
+
+    ;; The glorious "func" type-switch!
+    (('func . rest)
+     (cond
+      ((vector? (car rest)) `((define-method-func ,@rest)))
+      ((symbol? (car rest)) `((define-func ,@rest)))
+      ((list? (car rest)) `((lambda-func ,@rest)))
+      (else (error "func expected symbol, vector, or list"))))
+
+    (('func... . rest)
+     (cond
+      ((vector? (car rest)) `((define-method-func... ,@rest)))
+      ((symbol? (car rest)) `((define-func... ,@rest)))
+      ((list? (car rest)) `((lambda-func... ,@rest)))
+      (else (error "func... expected symbol, vector, or list"))))
+
+  );match
+);define
